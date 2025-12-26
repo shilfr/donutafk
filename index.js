@@ -1,169 +1,203 @@
-// --- Web Server for Render/Replit Keep-Alive ---
+// ==========================================
+// 1. 24/7 KEEP-ALIVE SERVER
+// ==========================================
 const express = require('express');
 const app = express();
-// Render uses port 10000 by default, Replit uses 3000
-const PORT = process.env.PORT || 10000; 
+const PORT = process.env.PORT || 10000;
 
-app.get('/', (req, res) => {
-  res.send('DonutSMP Bot is Online and Healthy!');
-});
+app.get('/', (req, res) => res.send('DonutSMP Live Tracker: 🟢 Active'));
+app.listen(PORT, '0.0.0.0', () => console.log(`🌐 Server running on port ${PORT}`));
 
-// Important: Bind to 0.0.0.0 for Render to detect the port
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🌐 Web server successfully listening on port ${PORT}`);
-});
-
-// --- Original script starts here ---
+// ==========================================
+// 2. CONFIGURATION
+// ==========================================
 const mineflayer = require('mineflayer');
-const readline = require('readline');
-const mc = require('minecraft-protocol');
 const https = require('https');
 const url = require('url');
 
-// Silence normal Mineflayer logs
-const noopLogger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
-
-// Suppress the "Chunk size" partial packet warning
-const originalLog = console.log;
-const originalWarn = console.warn;
-
-const shouldFilter = function(...args) {
-  const message = args.join(' ');
-  return message.includes('Chunk size is') && message.includes('partial packet');
-};
-
-console.log = function(...args) {
-  if (!shouldFilter(...args)) {
-    originalLog.apply(console, args);
-  }
-};
-
-console.warn = function(...args) {
-  if (!shouldFilter(...args)) {
-    originalWarn.apply(console, args);
-  }
-};
-
-// Patch protocol to ignore partial packet warnings
-mc.Client.prototype.emit = (function(originalEmit) {
-  return function(event, data) {
-    if (event === 'packet' && data && data.name === 'player_info') return;
-    return originalEmit.apply(this, arguments);
-  };
-})(mc.Client.prototype.emit);
-
+// YOUR DETAILS
 const WEBHOOK_URL = 'https://discord.com/api/webhooks/1437378357607010345/K7lAfe1rc2kWNVBUPkACIiensPEQYw023YgEQu9MQv9RTLWpZhWKQQt1lhQbRYbskNja';
+const API_KEY = '93b93228c9954e33989c0e1f049c4662';
+const STATS_INTERVAL = 120000; // 2 Minutes
+const CONTROLLER_NAME = "fx3r"; // REPLACE THIS with your real IGN to control the bot!
 
-function sendToDiscord(embed) {
-  const payload = JSON.stringify({ embeds: [embed] });
-  const urlObj = new url.URL(WEBHOOK_URL);
-  const options = {
-    hostname: urlObj.hostname,
-    path: urlObj.pathname + urlObj.search,
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(payload)
-    }
-  };
+let initialStats = null;
+const scriptStartTime = Date.now();
 
-  const req = https.request(options, (res) => {
-    if (res.statusCode !== 204 && res.statusCode !== 200) {
-      console.error(`Discord webhook error: ${res.statusCode}`);
+// ==========================================
+// 3. UTILITY FUNCTIONS
+// ==========================================
+function formatNum(num, type = 'k') {
+    if (!num) return '0';
+    const n = parseFloat(num);
+    if (type === 'money') {
+        if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+        if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
+        if (n >= 1e3) return `${(n / 1e3).toFixed(2)}K`;
     }
-  });
-  req.on('error', (err) => console.error('Failed to send to Discord:', err.message));
-  req.write(payload);
-  req.end();
+    if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+    return n.toString();
 }
 
-function fetchPlayerStats(username) {
-  return new Promise((resolve) => {
-    const statsUrl = `https://api.donutsmp.net/v1/stats/${username}`;
-    const urlObj = new url.URL(statsUrl);
-    const options = {
-      hostname: urlObj.hostname,
-      path: urlObj.pathname + urlObj.search,
-      method: 'GET',
-      headers: {
-        'accept': 'application/json',
-        'Authorization': process.env.DONUTSMP_API_TOKEN || ''
-      }
-    };
+function formatTime(ms) {
+    if (!ms) return '0m';
+    const s = Math.floor(ms / 1000);
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return `${d > 0 ? d + 'd ' : ''}${h}h ${m}m`;
+}
 
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => {
-        try {
-          const stats = JSON.parse(data);
-          resolve(stats);
-        } catch (err) {
-          resolve(null);
-        }
-      });
+function sendWebhook(payload) {
+    const data = JSON.stringify(payload);
+    const urlObj = new url.URL(WEBHOOK_URL);
+    const req = https.request({
+        hostname: urlObj.hostname,
+        path: urlObj.pathname + urlObj.search,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }
     });
-    req.on('error', (err) => resolve(null));
+    req.on('error', (e) => console.error(`Webhook Error: ${e.message}`));
+    req.write(data);
     req.end();
-  });
 }
 
+function fetchStats(username) {
+    return new Promise((resolve) => {
+        const req = https.request({
+            hostname: 'api.donutsmp.net',
+            path: `/v1/stats/${username}`,
+            method: 'GET',
+            timeout: 5000,
+            headers: { 'accept': 'application/json', 'Authorization': `Bearer ${API_KEY}` }
+        }, (res) => {
+            let data = '';
+            res.on('data', c => data += c);
+            res.on('end', () => {
+                try { resolve({ ok: true, data: JSON.parse(data) }); }
+                catch { resolve({ ok: false, data: null }); }
+            });
+        });
+        req.on('error', () => resolve({ ok: false, data: null }));
+        req.on('timeout', () => { req.destroy(); resolve({ ok: false, data: null }); });
+        req.end();
+    });
+}
+
+// ==========================================
+// 4. MAIN BOT LOGIC
+// ==========================================
 function startBot() {
-  const bot = mineflayer.createBot({
-    host: 'donutsmp.net',
-    port: 25565,
-    username: process.env.MC_EMAIL,
-    auth: 'microsoft',
-    logger: noopLogger
-  });
+    const bot = mineflayer.createBot({
+        host: 'donutsmp.net',
+        port: 25565,
+        username: process.env.MC_EMAIL,
+        auth: 'microsoft',
+        version: '1.20.1',
+        hideErrors: true
+    });
 
-  let statusInterval;
-  let playerUsername = '';
-  const recentMessages = [];
-  const scriptStartTime = Date.now();
-  let previousStats = null;
+    let loopInterval;
 
-  bot.once('spawn', () => {
-    playerUsername = bot.username || bot.player?.name || process.env.MC_EMAIL?.split('@')[0];
-    console.log(`✅ Connected to DonutSMP as ${playerUsername}`);
-    
-    statusInterval = setInterval(async () => {
-      if (!bot.entity) return;
-      
-      const apiResponse = await fetchPlayerStats(playerUsername);
-      const stats = apiResponse?.result || apiResponse || {};
-      const isOnline = !!(bot.entity && bot.entity.position);
-      const embedColor = isOnline ? 0x00ff00 : 0xff0000;
-      
-      const uptimeMs = Date.now() - scriptStartTime;
-      const uptimeHours = Math.floor(uptimeMs / (1000 * 60 * 60));
-      const uptimeMinutes = Math.floor((uptimeMs % (1000 * 60 * 60)) / (1000 * 60));
-      
-      const fields = [
-        { name: '👤 Player', value: playerUsername, inline: true },
-        { name: isOnline ? '🟢 Status' : '🔴 Status', value: isOnline ? 'Online' : 'Offline', inline: true },
-        { name: '⏰ Uptime', value: `${uptimeHours}h ${uptimeMinutes}m`, inline: true }
-      ];
-      
-      // ... (Stats processing logic remains same) ...
+    bot.once('spawn', () => {
+        const ign = bot.username;
+        console.log(`✅ [${ign}] Joined DonutSMP!`);
 
-      const embed = {
-        title: `${isOnline?'🟢':'🔴'} ${bot.username}'s Statistics`,
-        color: embedColor,
-        thumbnail: { url:`https://mc-heads.net/avatar/${bot.username}/64.png` },
-        fields: fields,
-        footer: { text: 'DonutSMP Bot | Status Updates' },
-        timestamp: new Date().toISOString()
-      };
-      sendToDiscord(embed);
-    }, 60000);
-  });
+        sendWebhook({
+            embeds: [{
+                title: `🟢 Live Tracking Started`,
+                color: 0x57F287,
+                description: `**Account:** ${ign}\n**Update Speed:** Every 2 mins`,
+                footer: { text: 'Session Started' }
+            }]
+        });
 
-  bot.on('end', (reason) => {
-    console.log(`❌ Disconnected: ${reason}`);
-    if (statusInterval) clearInterval(statusInterval);
-    setTimeout(startBot, 5000);
-  });
+        // --- STATS LOOP (Every 2 Minutes) ---
+        loopInterval = setInterval(async () => {
+            if (!bot.entity) return;
+
+            const { ok, data } = await fetchStats(ign);
+            const stats = data?.result || data || {};
+            const available = ok;
+
+            let moneyDiff = '+0';
+            let shardsDiff = '+0';
+            
+            if (available) {
+                if (!initialStats) initialStats = { money: stats.money, shards: stats.shards };
+                const mGain = parseFloat(stats.money) - parseFloat(initialStats.money);
+                const sGain = parseFloat(stats.shards) - parseFloat(initialStats.shards);
+                
+                if (mGain !== 0) moneyDiff = `${mGain > 0 ? '+' : ''}${formatNum(mGain, 'money')}`;
+                if (sGain !== 0) shardsDiff = `${sGain > 0 ? '+' : ''}${formatNum(sGain)}`;
+            }
+
+            const uptime = Date.now() - scriptStartTime;
+
+            sendWebhook({
+                embeds: [{
+                    title: `📊 ${ign} Live Stats`,
+                    color: available ? 0xFEE75C : 0xED4245,
+                    fields: [
+                        { name: '⏱️ Uptime', value: `\`${formatTime(uptime)}\``, inline: true },
+                        { name: '📡 API', value: available ? '✅ OK' : '❌ Down', inline: true },
+                        { name: '\u200b', value: '\u200b', inline: true }, // Spacer
+                        { name: '💵 Money', value: `**${formatNum(stats.money, 'money')}**\n\`${moneyDiff}/session\``, inline: true },
+                        { name: '💎 Shards', value: `**${formatNum(stats.shards)}**\n\`${shardsDiff}/session\``, inline: true },
+                        { name: '⌛ Playtime', value: `\`${formatTime(stats.playtime)}\``, inline: true }
+                    ],
+                    timestamp: new Date().toISOString()
+                }]
+            });
+        }, STATS_INTERVAL);
+    });
+
+    // --- LIVE CHAT RELAY ---
+    bot.on('message', (jsonMsg) => {
+        const message = jsonMsg.toString();
+        // Filter out spam/empty messages
+        if (!message || message.trim().length === 0) return;
+        
+        // Don't send the "You whispered to" messages to avoid double spam
+        if (message.startsWith("You whispered")) return;
+
+        // Send to Discord
+        sendWebhook({
+            content: `💬 **[GAME]** \`${message}\``
+        });
+        
+        console.log(`[CHAT] ${message}`);
+    });
+
+    // --- WHISPER CONTROLLER ---
+    // Usage: Whisper the bot "cmd /spawn" or "cmd /pay User 100"
+    bot.on('whisper', (username, message) => {
+        if (username === CONTROLLER_NAME) {
+            if (message.startsWith('cmd ')) {
+                const command = message.replace('cmd ', '');
+                bot.chat(command);
+                bot.whisper(username, `✅ Executed: ${command}`);
+            }
+        }
+    });
+
+    // --- RECONNECT LOGIC ---
+    bot.on('end', (reason) => {
+        console.log(`❌ Disconnected: ${reason}`);
+        if (loopInterval) clearInterval(loopInterval);
+        
+        sendWebhook({
+            embeds: [{
+                title: `🔴 Bot Disconnected`,
+                color: 0xED4245,
+                description: `Reason: ${reason}\nReconnecting in 15s...`
+            }]
+        });
+
+        setTimeout(startBot, 15000);
+    });
+
+    bot.on('error', console.log);
 }
 
 startBot();
