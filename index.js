@@ -6,7 +6,7 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 // SECURITY: Your private URL password
-const SECRET_KEY = "$2a$10$nF6aAokZD1gSVtf48826.O2yijAFd0DzQ.IBn5dtPQT4cIimyHZdS"; 
+const SECRET_KEY = "ConsulOfNATO"; 
 
 let chatHistory = []; // Stores last 10 messages for the web view
 
