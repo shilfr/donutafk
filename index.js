@@ -6,6 +6,7 @@ const PORT = process.env.PORT || 10000;
 
 const ADMIN_KEY = "ConsulOfNATO"; 
 const activeBots = {}; 
+const userRegistry = {}; // Simple persistent registry: { username: secretKey }
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -23,10 +24,12 @@ const UI_STYLE = `
         .status-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; margin-top: 8px; text-transform: uppercase; }
         .online { background: rgba(87, 242, 135, 0.1); color: #57F287; border: 1px solid #57F287; }
         .offline { background: rgba(237, 66, 69, 0.1); color: #ed4245; border: 1px solid #ed4245; }
-        #terminal { background: #000; height: 250px; overflow-y: auto; padding: 10px; border-radius: 8px; border: 1px solid #333; color: #0f0; font-family: monospace; font-size: 11px; white-space: pre-wrap; margin-bottom: 10px; }
-        .auth-box { background: #5865f2; color: white; padding: 15px; border-radius: 8px; margin-bottom: 15px; font-weight: bold; border-left: 5px solid #fff; animation: pulse 2s infinite; }
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
-        input { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #333; background: #000; color: #fff; box-sizing: border-box; margin-bottom: 10px; }
+        #terminal { background: #000; height: 280px; overflow-y: auto; padding: 10px; border-radius: 8px; border: 1px solid #333; color: #0f0; font-family: monospace; font-size: 11px; white-space: pre-wrap; margin-bottom: 10px; }
+        .auth-box { background: #5865f2; color: white; padding: 15px; border-radius: 8px; margin-bottom: 15px; font-weight: bold; border-left: 5px solid #fff; box-shadow: 0 0 20px rgba(88, 101, 242, 0.4); }
+        .input-container { position: relative; margin-bottom: 15px; }
+        input { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #333; background: #000; color: #fff; box-sizing: border-box; font-size: 16px; }
+        input::placeholder { color: #555; transition: 0.3s; }
+        input:focus::placeholder { opacity: 0.3; transform: translateX(10px); }
         .btn { width: 100%; padding: 12px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; display: block; }
         .btn-green { background: #57F287; color: #000; }
         .btn-blue { background: #3498db; color: #fff; }
@@ -34,7 +37,6 @@ const UI_STYLE = `
     </style>
 `;
 
-// Helper Functions
 function formatPlaytime(ms) {
     let d = Math.floor(ms / 86400000);
     let h = Math.floor((ms % 86400000) / 3600000);
@@ -43,12 +45,17 @@ function formatPlaytime(ms) {
 }
 
 app.get('/', (req, res) => {
-    res.send(`<html><head>${UI_STYLE}</head><body><h2 style="text-align:center;">☠️ NoLifeBot Cloud</h2><div class="card"><h3>🚀 Start Session</h3><form action="/launch" method="POST"><input type="text" name="ign" placeholder="Username" required><input type="text" name="server" value="donutsmp.net" required><input type="text" name="secret" placeholder="Private Secret Key" required><button class="btn btn-green">Launch Instance</button></form></div></body></html>`);
+    res.send(`<html><head>${UI_STYLE}</head><body><h2 style="text-align:center;">☠️ NoLifeBot Cloud</h2>
+    <div class="card"><h3>🚀 Start Session</h3><form action="/launch" method="POST">
+    <div class="input-container"><input type="text" name="ign" placeholder="Minecraft Username" required></div>
+    <div class="input-container"><input type="text" name="server" value="donutsmp.net" required></div>
+    <div class="input-container"><input type="password" name="secret" placeholder="Create a secure safety key (do not share with anyone)" required></div>
+    <button class="btn btn-green">Launch Instance</button></form></div></body></html>`);
 });
 
 app.get('/' + ADMIN_KEY, (req, res) => {
     const bots = Object.keys(activeBots).map(k => `<div class="stat-box" style="text-align:left; margin-bottom:5px;"><b>${activeBots[k].config.ign}</b> [${activeBots[k].status}]</div>`).join('');
-    res.send(`<html><head>${UI_STYLE}</head><body><h2>👑 Admin Panel</h2><div class="card"><h3>📢 Global Broadcast</h3><form action="/admin-broadcast" method="POST"><input type="text" name="msg" placeholder="Message all bots..."><button class="btn btn-blue">Send Broadcast</button></form></div><div class="card"><h3>Active Sessions</h3>${bots || 'None'}</div></body></html>`);
+    res.send(`<html><head>${UI_STYLE}</head><body><h2>👑 Admin Panel</h2><div class="card"><h3>Active Sessions</h3>${bots || 'None'}</div></body></html>`);
 });
 
 app.get('/stream/:secret', (req, res) => {
@@ -57,7 +64,7 @@ app.get('/stream/:secret', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     const itv = setInterval(() => {
         if (!activeBots[req.params.secret]) return res.end();
-        const entities = session.bot?.entities ? Object.values(session.bot.entities).filter(e => e.type === 'player' || e.type === 'mob').map(e => e.name || e.type).slice(0, 5).join(', ') : 'None';
+        const entities = session.bot?.entities ? Object.values(session.bot.entities).filter(e => e.type === 'player' || e.type === 'mob').map(e => e.name || e.type).slice(0, 5).join(', ') : 'Scanning...';
         res.write('data: ' + JSON.stringify({ stats: session.stats, logs: session.logs.slice(0, 30), status: session.status, scene: entities }) + '\n\n');
     }, 2000);
     req.on('close', () => clearInterval(itv));
@@ -79,9 +86,9 @@ app.get('/:secret', (req, res) => {
             <div class="stat-box"><div class="stat-label">⏳ Playtime</div><div id="p-val" class="stat-value">${session.stats.playtime}</div></div>
             <div class="stat-box"><div class="stat-label">⏱️ Session</div><div id="sess-val" class="stat-value">0m</div></div>
         </div>
-        <div class="card"><div class="stat-label">👁️ Scene Describer</div><div id="scene-val" style="font-size:0.9em; margin-top:5px; color:#aaa;">Scanning...</div></div>
-        <div class="card"><h3>📟 Terminal</h3><div id="terminal"></div><form onsubmit="sendCmd(event)"><input type="text" id="cmdInput" placeholder="Send a message or command..."><button class="btn btn-blue">Send Message</button></form></div>
-        <form action="/stop-bot" method="POST" onsubmit="return confirm('Kill process?')"><input type="hidden" name="secret" value="${secret}"><button class="btn btn-red">🛑 STOP & WIPE SESSION</button></form>
+        <div class="card"><div class="stat-label">👁️ Nearby Scene</div><div id="scene-val" style="font-size:0.9em; margin-top:5px; color:#aaa;">Scanning...</div></div>
+        <div class="card"><h3>📟 Terminal</h3><div id="terminal"></div><form onsubmit="sendCmd(event)"><input type="text" id="cmdInput" placeholder="Send a message..."><button class="btn btn-blue" style="margin-top:10px;">Send Message</button></form></div>
+        <form action="/stop-bot" method="POST"><input type="hidden" name="secret" value="${secret}"><button class="btn btn-red">🛑 STOP & WIPE SESSION</button></form>
         <script>
             let start = Date.now();
             const evtSource = new EventSource("/stream/${secret}");
@@ -90,7 +97,7 @@ app.get('/:secret', (req, res) => {
                 document.getElementById("m-val").innerText = "$" + d.stats.money;
                 document.getElementById("s-val").innerText = d.stats.shards;
                 document.getElementById("p-val").innerText = d.stats.playtime;
-                document.getElementById("scene-val").innerText = "Nearby: " + d.scene;
+                document.getElementById("scene-val").innerText = d.scene;
                 document.getElementById("status-badge").className = "status-badge " + d.status;
                 document.getElementById("status-badge").innerText = d.status;
                 document.getElementById("terminal").innerHTML = d.logs.join("");
@@ -104,14 +111,30 @@ function createBot(secret) {
     const s = activeBots[secret];
     const bot = mineflayer.createBot({ host: s.config.server, username: s.config.ign, auth: 'microsoft', version: '1.20.1' });
     
+    // FORCED MICROSOFT AUTH INTERCEPTOR
     bot.on('auth-device', (data) => {
-        s.logs.unshift('<div class="auth-box">🔑 MICROSOFT AUTH REQUIRED<br>Link: microsoft.com/link<br>Code: ' + data.user_code + '</div>');
+        const msg = '<div class="auth-box">🔑 MICROSOFT AUTH REQUIRED<br>Link: <a href="' + data.verification_uri + '" target="_blank" style="color:white;">microsoft.com/link</a><br>Code: <span style="font-size:1.5em;">' + data.user_code + '</span></div>';
+        s.logs.unshift(msg);
     });
 
     s.bot = bot;
-    bot.once('spawn', () => { s.status = 'online'; s.logs.unshift("<div>[System] 🟢 Spawned successfully!</div>"); });
-    bot.on('message', (m) => { s.logs.unshift("<div>" + m.toString() + "</div>"); if (s.logs.length > 50) s.logs.pop(); });
-    bot.on('end', () => { s.status = 'offline'; setTimeout(() => { if (activeBots[secret]) createBot(secret); }, 15000); });
+    bot.once('spawn', () => { 
+        s.status = 'online'; 
+        s.logs.unshift("<div>[System] 🟢 Bot Successfully Joined!</div>");
+        // Ensure bot is actually in the server
+        bot.chat('/server donut'); 
+    });
+
+    bot.on('message', (m) => {
+        s.logs.unshift("<div>" + m.toString() + "</div>");
+        if (s.logs.length > 50) s.logs.pop();
+    });
+
+    bot.on('error', (err) => { s.logs.unshift("<div style='color:#ed4245;'>[Error] " + err.message + "</div>"); });
+    bot.on('end', () => { 
+        s.status = 'offline'; 
+        setTimeout(() => { if (activeBots[secret]) createBot(secret); }, 15000); 
+    });
 
     const apiInt = setInterval(() => {
         if (!activeBots[secret]) return clearInterval(apiInt);
@@ -131,7 +154,14 @@ function createBot(secret) {
 
 app.post('/launch', (req, res) => {
     const { ign, server, secret } = req.body;
-    activeBots[secret] = { logs: ["<div>[System] 🟡 Initializing...</div>"], stats: { money: "0.00", shards: "0.00k", playtime: "0d 0h 0m" }, config: { ign, server }, status: 'offline' };
+    
+    // PRIVACY & SECURITY LOGIC
+    if (userRegistry[ign] && userRegistry[ign] !== secret) {
+        return res.send("<h2 style='color:red; font-family:sans-serif;'>❌ Incorrect Security Key for this account.</h2><a href='/'>Go Back</a>");
+    }
+    
+    userRegistry[ign] = secret; // Save key to registry
+    activeBots[secret] = { logs: ["<div>[System] 🟡 Booting... Check for Auth Code shortly.</div>"], stats: { money: "0.00", shards: "0.00k", playtime: "0d 0h 0m" }, config: { ign, server }, status: 'offline' };
     createBot(secret);
     res.redirect("/" + secret);
 });
@@ -142,15 +172,10 @@ app.post('/send-cmd', (req, res) => {
     res.sendStatus(200);
 });
 
-app.post('/admin-broadcast', (req, res) => {
-    Object.values(activeBots).forEach(s => s.status === 'online' && s.bot.chat(req.body.msg));
-    res.redirect("/" + ADMIN_KEY);
-});
-
 app.post('/stop-bot', (req, res) => {
     if (activeBots[req.body.secret]) { activeBots[req.body.secret].bot?.quit(); delete activeBots[req.body.secret]; }
     res.redirect('/');
 });
 
 app.listen(PORT);
-            
+
