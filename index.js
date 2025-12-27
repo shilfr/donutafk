@@ -25,7 +25,7 @@ const UI_STYLE = `
         .online { background: rgba(87, 242, 135, 0.1); color: #57F287; border: 1px solid #57F287; }
         .offline { background: rgba(237, 66, 69, 0.1); color: #ed4245; border: 1px solid #ed4245; }
         #terminal { background: #000; height: 280px; overflow-y: auto; padding: 10px; border-radius: 8px; border: 1px solid #333; color: #0f0; font-family: monospace; font-size: 11px; white-space: pre-wrap; margin-bottom: 10px; }
-        .auth-box { background: #5865f2; color: white; padding: 15px; border-radius: 8px; margin-bottom: 15px; font-weight: bold; border-left: 5px solid #fff; }
+        .auth-box { background: #5865f2; color: white; padding: 15px; border-radius: 8px; margin-bottom: 15px; font-weight: bold; border: 2px solid #fff; box-shadow: 0 0 15px #5865f2; }
         .btn { width: 100%; padding: 12px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; display: block; margin-top: 5px; }
         .btn-green { background: #57F287; color: #000; }
         .btn-blue { background: #3498db; color: #fff; }
@@ -51,8 +51,7 @@ app.get('/stream/:secret', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     const itv = setInterval(() => {
         if (!activeBots[req.params.secret]) return res.end();
-        const entities = session.bot?.entities ? Object.values(session.bot.entities).filter(e => e.type === 'player').map(e => e.username).slice(0, 5).join(', ') : 'None';
-        res.write('data: ' + JSON.stringify({ stats: session.stats, logs: session.logs.slice(0, 30), status: session.status, scene: entities }) + '\n\n');
+        res.write('data: ' + JSON.stringify({ stats: session.stats, logs: session.logs.slice(0, 30), status: session.status }) + '\n\n');
     }, 2000);
     req.on('close', () => clearInterval(itv));
 });
@@ -74,6 +73,12 @@ app.get('/:secret', (req, res) => {
             <div class="stat-box"><div class="stat-label">⏱️ Session</div><div id="sess-val" class="stat-value">0m</div></div>
         </div>
         <div class="card"><h3>📟 Terminal</h3><div id="terminal"></div><form onsubmit="sendCmd(event)"><input type="text" id="cmdInput" placeholder="Send a message..."><button class="btn btn-blue">Send Message</button></form></div>
+        <form action="/launch" method="POST">
+            <input type="hidden" name="ign" value="${session.config.ign}">
+            <input type="hidden" name="server" value="${session.config.server}">
+            <input type="hidden" name="secret" value="${secret}">
+            <button class="btn btn-blue" style="background:#444;">♻️ RE-FETCH AUTH CODE</button>
+        </form>
         <form action="/stop-bot" method="POST"><input type="hidden" name="secret" value="${secret}"><button class="btn btn-red">🛑 STOP SESSION</button></form>
         <script>
             let start = Date.now();
@@ -95,41 +100,58 @@ app.get('/:secret', (req, res) => {
 function createBot(secret) {
     const s = activeBots[secret];
     
-    // Explicitly handling Microsoft Auth with high priority
-    const bot = mineflayer.createBot({ 
+    // KILL EXISTING BOT BEFORE RESTARTING
+    if (s.bot) { try { s.bot.quit(); } catch(e){} }
+
+    s.logs.unshift("<div>[System] 🔍 Requesting Microsoft code...</div>");
+
+    s.bot = mineflayer.createBot({ 
         host: s.config.server, 
         username: s.config.ign, 
         auth: 'microsoft', 
         version: '1.20.1',
+        // This is the key event for the Device Flow
         onMsaCode: (data) => {
-            const msg = '<div class="auth-box">🔑 AUTH CODE: ' + data.user_code + '<br><a href="' + data.verification_uri + '" target="_blank" style="color:white;">Click to Login</a></div>';
+            console.log("Auth code generated:", data.user_code); // Also logs to Render console for backup
+            const msg = '<div class="auth-box">⚠️ ACTION REQUIRED<br>1. Go to: <a href="https://microsoft.com/link" target="_blank" style="color:white;text-decoration:underline;">microsoft.com/link</a><br>2. Enter Code: <span style="font-size:1.4em;letter-spacing:2px;">' + data.user_code + '</span></div>';
             s.logs.unshift(msg);
         }
     });
 
-    s.bot = bot;
-    bot.once('spawn', () => { 
+    s.bot.once('spawn', () => { 
         s.status = 'online'; 
-        s.logs.unshift("<div>[System] 🟢 Spawned!</div>");
-        bot.chat('/server donut');
+        s.logs.unshift("<div>[System] 🟢 Bot Online! Joining Donut...</div>");
+        setTimeout(() => { s.bot.chat('/server donut'); }, 2000);
     });
 
-    bot.on('message', (m) => {
+    s.bot.on('message', (m) => {
         s.logs.unshift("<div>" + m.toString() + "</div>");
         if (s.logs.length > 50) s.logs.pop();
     });
 
-    bot.on('end', () => { 
+    s.bot.on('error', (err) => {
+        s.logs.unshift("<div style='color:#ed4245;'>[Error] " + err.message + "</div>");
+    });
+
+    s.bot.on('end', (reason) => { 
         s.status = 'offline'; 
-        setTimeout(() => { if (activeBots[secret]) createBot(secret); }, 15000); 
+        s.logs.unshift("<div>[System] 🔴 Connection Ended: " + reason + "</div>");
     });
 }
 
 app.post('/launch', (req, res) => {
     const { ign, server, secret } = req.body;
-    if (userRegistry[ign] && userRegistry[ign] !== secret) return res.send("Key Incorrect.");
+    if (userRegistry[ign] && userRegistry[ign] !== secret) return res.send("Security Key Mismatch.");
+    
     userRegistry[ign] = secret;
-    activeBots[secret] = { logs: ["<div>[System] 🟡 Booting... code should appear below.</div>"], stats: { money: "0.00", shards: "0.00k", playtime: "0d 0h 0m" }, config: { ign, server }, status: 'offline' };
+    activeBots[secret] = { 
+        logs: ["<div>[System] 🟡 Initializing Handshake...</div>"], 
+        stats: { money: "0.00", shards: "0.00k", playtime: "0d 0h 0m" }, 
+        config: { ign, server }, 
+        status: 'offline',
+        bot: null
+    };
+    
     createBot(secret);
     res.redirect("/" + secret);
 });
@@ -141,9 +163,12 @@ app.post('/send-cmd', (req, res) => {
 });
 
 app.post('/stop-bot', (req, res) => {
-    if (activeBots[req.body.secret]) { activeBots[req.body.secret].bot?.quit(); delete activeBots[req.body.secret]; }
+    if (activeBots[req.body.secret]) { 
+        try { activeBots[req.body.secret].bot.quit(); } catch(e){}
+        delete activeBots[req.body.secret]; 
+    }
     res.redirect('/');
 });
 
 app.listen(PORT);
-                     
+                  
