@@ -19,7 +19,7 @@ const url = require('url');
 const WEBHOOK_URL = 'https://discord.com/api/webhooks/1437378357607010345/K7lAfe1rc2kWNVBUPkACIiensPEQYw023YgEQu9MQv9RTLWpZhWKQQt1lhQbRYbskNja';
 const API_KEY = '93b93228c9954e33989c0e1f049c4662';
 const STATS_INTERVAL = 120000; // 2 Minutes
-const CONTROLLER_NAME = "fx3r"; // REPLACE THIS with your real IGN to control the bot!
+const CONTROLLER_NAME = "fx3r";
 
 let initialStats = null;
 const scriptStartTime = Date.now();
@@ -47,7 +47,6 @@ function formatTime(ms) {
     const m = Math.floor((s % 3600) / 60);
     return `${d > 0 ? d + 'd ' : ''}${h}h ${m}m`;
 }
-
 function sendWebhook(payload) {
     const data = JSON.stringify(payload);
     const urlObj = new url.URL(WEBHOOK_URL);
@@ -55,7 +54,11 @@ function sendWebhook(payload) {
         hostname: urlObj.hostname,
         path: urlObj.pathname + urlObj.search,
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }
+        headers: { 
+            'Content-Type': 'application/json', 
+            'Content-Length': Buffer.byteLength(data),
+            'User-Agent': 'DonutSMP-Bot/1.0' // Added to prevent 403 errors
+        }
     });
     req.on('error', (e) => console.error(`Webhook Error: ${e.message}`));
     req.write(data);
@@ -69,7 +72,11 @@ function fetchStats(username) {
             path: `/v1/stats/${username}`,
             method: 'GET',
             timeout: 5000,
-            headers: { 'accept': 'application/json', 'Authorization': `Bearer ${API_KEY}` }
+            headers: { 
+                'accept': 'application/json', 
+                'Authorization': `Bearer ${API_KEY}`,
+                'User-Agent': 'DonutSMP-Bot/1.0' // Added for API compliance
+            }
         }, (res) => {
             let data = '';
             res.on('data', c => data += c);
@@ -88,18 +95,30 @@ function fetchStats(username) {
 // 4. MAIN BOT LOGIC
 // ==========================================
 function startBot() {
+    // Clear initial stats on reconnect
+    initialStats = null;
     const bot = mineflayer.createBot({
         host: 'donutsmp.net',
         port: 25565,
         username: process.env.MC_EMAIL,
         auth: 'microsoft',
         version: '1.20.1',
-        hideErrors: true
+        hideErrors: false, // Changed to see actual errors
+        checkTimeoutInterval: 60 * 1000, // Increased timeout
+        connectTimeout: 30 * 1000 // Added explicit timeout
     });
 
     let loopInterval;
+    let isAlive = false;
 
+    // Handle successful login
+    bot.once('login', () => {
+        console.log(`🔑 Authenticated as ${bot.username}`);
+    });
+
+    // Handle world spawn (actual game entry)
     bot.once('spawn', () => {
+        isAlive = true;
         const ign = bot.username;
         console.log(`✅ [${ign}] Joined DonutSMP!`);
 
@@ -114,7 +133,7 @@ function startBot() {
 
         // --- STATS LOOP (Every 2 Minutes) ---
         loopInterval = setInterval(async () => {
-            if (!bot.entity) return;
+            if (!isAlive || !bot.entity) return;
 
             const { ok, data } = await fetchStats(ign);
             const stats = data?.result || data || {};
@@ -126,8 +145,7 @@ function startBot() {
             if (available) {
                 if (!initialStats) initialStats = { money: stats.money, shards: stats.shards };
                 const mGain = parseFloat(stats.money) - parseFloat(initialStats.money);
-                const sGain = parseFloat(stats.shards) - parseFloat(initialStats.shards);
-                
+                const sGain = parseFloat(stats.shards) - parseFloat(initialStats.shards);                
                 if (mGain !== 0) moneyDiff = `${mGain > 0 ? '+' : ''}${formatNum(mGain, 'money')}`;
                 if (sGain !== 0) shardsDiff = `${sGain > 0 ? '+' : ''}${formatNum(sGain)}`;
             }
@@ -141,7 +159,7 @@ function startBot() {
                     fields: [
                         { name: '⏱️ Uptime', value: `\`${formatTime(uptime)}\``, inline: true },
                         { name: '📡 API', value: available ? '✅ OK' : '❌ Down', inline: true },
-                        { name: '\u200b', value: '\u200b', inline: true }, // Spacer
+                        { name: '\u200b', value: '\u200b', inline: true },
                         { name: '💵 Money', value: `**${formatNum(stats.money, 'money')}**\n\`${moneyDiff}/session\``, inline: true },
                         { name: '💎 Shards', value: `**${formatNum(stats.shards)}**\n\`${shardsDiff}/session\``, inline: true },
                         { name: '⌛ Playtime', value: `\`${formatTime(stats.playtime)}\``, inline: true }
@@ -153,15 +171,15 @@ function startBot() {
     });
 
     // --- LIVE CHAT RELAY ---
-    bot.on('message', (jsonMsg) => {
-        const message = jsonMsg.toString();
-        // Filter out spam/empty messages
+    bot.on('messagestr', (message, messagePosition, jsonMsg) => { // Changed to messagestr
+        if (!isAlive) return;
+        
+        // Filter out empty messages
         if (!message || message.trim().length === 0) return;
         
-        // Don't send the "You whispered to" messages to avoid double spam
+        // Skip whisper confirmations
         if (message.startsWith("You whispered")) return;
 
-        // Send to Discord
         sendWebhook({
             content: `💬 **[GAME]** \`${message}\``
         });
@@ -170,35 +188,48 @@ function startBot() {
     });
 
     // --- WHISPER CONTROLLER ---
-    // Usage: Whisper the bot "cmd /spawn" or "cmd /pay User 100"
     bot.on('whisper', (username, message) => {
+        if (!isAlive) return;
         if (username === CONTROLLER_NAME) {
             if (message.startsWith('cmd ')) {
                 const command = message.replace('cmd ', '');
                 bot.chat(command);
-                bot.whisper(username, `✅ Executed: ${command}`);
-            }
+                bot.whisper(username, `✅ Executed: ${command}`);            }
         }
     });
 
-    // --- RECONNECT LOGIC ---
-    bot.on('end', (reason) => {
-        console.log(`❌ Disconnected: ${reason}`);
+    // --- DISCONNECT HANDLING ---
+    function handleDisconnect(reason) {
+        isAlive = false;
         if (loopInterval) clearInterval(loopInterval);
+        
+        console.log(`❌ Disconnected: ${reason || 'Unknown reason'}`);
         
         sendWebhook({
             embeds: [{
                 title: `🔴 Bot Disconnected`,
                 color: 0xED4245,
-                description: `Reason: ${reason}\nReconnecting in 15s...`
+                description: `Reason: ${reason || 'Connection lost'}\nReconnecting in 15s...`
             }]
         });
 
-        setTimeout(startBot, 15000);
-    });
+        // Ensure clean bot destruction
+        bot.removeAllListeners();
+        bot.end?.();
 
-    bot.on('error', console.log);
+        setTimeout(startBot, 15000);
+    }
+
+    bot.on('end', handleDisconnect);
+    bot.on('error', (err) => {
+        console.error(`💥 Bot Error: ${err.message}`);
+        if (err.message.includes('ECONNRESET') || err.message.includes('socket hang up')) {
+            handleDisconnect('Network error');
+        }
+    });
+    
+    // Handle unexpected crashes
+    bot.on('kicked', (reason) => handleDisconnect(`Kicked: ${reason}`));
 }
 
 startBot();
-  
