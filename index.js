@@ -1,130 +1,106 @@
-require('dotenv').config();
+// NO DOTENV NEEDED - Reads from process.env directly
 const express = require('express');
 const mineflayer = require('mineflayer');
 const axios = require('axios');
 const CryptoJS = require('crypto-js');
+
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// ====== 🔒 SECURITY SETUP ======
-const PANEL_SECRET = process.env.PANEL_SECRET || 'change_this_immediately';
-const SECRET_HASH = CryptoJS.SHA256(PANEL_SECRET).toString();
-const MC_EMAIL = process.env.MC_EMAIL;
+// READ FROM ENVIRONMENT (Must be set in Render)
+const PANEL_SECRET = process.env.PANEL_SECRET || 'default_secret';
+const MC_EMAIL = process.env.MC_EMAIL || '';
 const WEBHOOK_URL = 'https://discord.com/api/webhooks/1437378357607010345/K7lAfe1rc2kWNVBUPkACIiensPEQYw023YgEQu9MQv9RTLWpZhWKQQt1lhQbRYbskNja';
 const CONTROLLER_NAME = "fx3r";
-const STATS_INTERVAL = 300000; // 5 minutes (matches your request)
-const RECONNECT_DELAY = 15000;
-const HEARTBEAT_INTERVAL = 60000; // Critical: kills bot if frozen
 
-// ====== 🌐 EXPRESS SETUP ======
+// Validate required environment variables
+if (!MC_EMAIL) {
+  console.error('❌ ERROR: MC_EMAIL not set in environment variables!');
+  console.error('   Please set MC_EMAIL in Render dashboard');
+  process.exit(1);
+}
+
+if (!PANEL_SECRET || PANEL_SECRET === 'default_secret') {
+  console.error('❌ ERROR: PANEL_SECRET not set or using default!');
+  console.error('   Please set PANEL_SECRET in Render dashboard');
+  process.exit(1);
+}
+
+// Webhook function (with error handling)
+async function sendWebhook(embed) {
+  if (!WEBHOOK_URL) return;
+  try {
+    await axios.post(WEBHOOK_URL, { embeds: [embed] }, { timeout: 5000 });
+  } catch (error) {
+    console.error('Webhook failed:', error.message);
+  }
+}
+
+// Express setup
 app.use(express.json());
 app.use(express.static('public'));
 
-// Public health check
+// Health check
 app.get('/', (req, res) => {
-  res.send(`DonutSMP Tracker: ${botState.isAlive ? '🟢 LIVE' : '🔴 OFFLINE'} | Uptime: ${formatTime(Date.now() - startTime)}`);
+  res.send(botState.isAlive ? '🟢 Bot Online' : '🔴 Bot Offline');
 });
 
-// Secure panel access
+// Panel authentication
 app.post('/api/verify', (req, res) => {
-  const hash = CryptoJS.SHA256(req.body.secret).toString();
-  res.json({ valid: hash === SECRET_HASH });
+  const hash = CryptoJS.SHA256(req.body.secret).toString();  const expectedHash = CryptoJS.SHA256(PANEL_SECRET).toString();
+  res.json({ valid: hash === expectedHash });
 });
 
-// Chat command endpoint
-app.post('/api/chat', (req, res) => {
-  if (CryptoJS.SHA256(req.body.secret).toString() !== SECRET_HASH) {
-    return res.status(403).json({ error: 'Invalid secret' });
-  }
-  if (botState.isAlive && currentBot) {
-    currentBot.chat(req.body.message);
-    logEvent('command', `Sent: ${req.body.message}`);
-    res.json({ success: true });
-  } else {
-    res.status(503).json({ error: 'Bot offline' });
-  }
-});
+// Bot state
+let botState = {
+  isAlive: false,
+  username: 'Not Connected',
+  lastEvent: 'Starting...',
+  uptime: '0m'
+};
 
-// SSE for live updates (requires verified session)
-const clients = new Set();
-app.get('/events', (req, res) => {  const hash = req.headers['x-panel-secret'];
-  if (hash !== SECRET_HASH) {
-    return res.status(403).end();
+let currentBot = null;
+let eventClients = [];
+
+// SSE for panel
+app.get('/events', (req, res) => {
+  const providedHash = req.headers['x-panel-secret'];
+  const expectedHash = CryptoJS.SHA256(PANEL_SECRET).toString();
+  
+  if (providedHash !== expectedHash) {
+    res.status(403).end();
+    return;
   }
   
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   
-  const sendEvent = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
-  clients.add(sendEvent);
+  const sendEvent = (data) => {
+    try {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    } catch (e) {
+      // Client disconnected
+      eventClients = eventClients.filter(client => client !== sendEvent);
+    }
+  };
   
-  // Initial state dump
-  sendEvent({ type: 'init', state: botState, stats: currentStats });
+  eventClients.push(sendEvent);
+  sendEvent({ type: 'init', state: botState });
   
-  req.on('close', () => clients.delete(sendEvent));
+  req.on('close', () => {
+    eventClients = eventClients.filter(client => client !== sendEvent);
+  });
 });
 
-// ====== 🤖 BOT STATE MANAGEMENT ======
-let currentBot = null;
-let statsInterval = null;
-let heartbeatInterval = null;
-let reconnectTimeout = null;
-const startTime = Date.now();
-const eventLog = [];
-const currentStats = { money: '0', shards: '0', playtime: '0m' };
-const botState = {
-  isAlive: false,
-  username: 'Offline',
-  server: 'donutsmp.net:25565',
-  lastEvent: 'Initializing...',
-  uptime: '0m'
-};
-
-function logEvent(type, message) {
-  const entry = { time: new Date().toLocaleTimeString(), type, message };
-  eventLog.unshift(entry);
-  if (eventLog.length > 100) eventLog.pop();
-  
-  // Broadcast to panel
-  const payload = { type: 'log', data: entry };
-  clients.forEach(client => client(payload));
-  
-  // Critical errors to console
-  if (['error', 'disconnect'].includes(type)) console.error(`[${type.toUpperCase()}] ${message}`);
-}
-
-function broadcastState() {
-  clients.forEach(client => client({ type: 'state', data: botState }));
-}
-function sendWebhook(embed) {
-  if (!WEBHOOK_URL) return;
-  axios.post(WEBHOOK_URL, { embeds: [embed] }, { timeout: 5000 })
-    .catch(err => logEvent('error', `Webhook failed: ${err.message}`));
-}
-
-function formatTime(ms) {
-  const s = Math.floor(ms / 1000);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  return `${h}h ${m}m`;
-}
-
-// ====== 🔄 ROBUST BOT HANDLER ======
+// Bot creation function
 function startBot() {
-  // Cleanup previous instance
-  if (currentBot) {
-    currentBot.removeAllListeners();
+  // Clean up previous bot
+  if (currentBot) {    currentBot.removeAllListeners();
     currentBot.end?.();
   }
-  if (statsInterval) clearInterval(statsInterval);
-  if (heartbeatInterval) clearInterval(heartbeatInterval);
   
-  // Reset state
-  botState.isAlive = false;
-  botState.lastEvent = 'Connecting...';
-  broadcastState();
-  logEvent('info', '🔄 Initiating connection to DonutSMP...');
+  console.log('🔄 Starting bot connection...');
   
   currentBot = mineflayer.createBot({
     host: 'donutsmp.net',
@@ -134,203 +110,90 @@ function startBot() {
     version: '1.20.2',
     hideErrors: false,
     connectTimeout: 30000,
-    checkTimeoutInterval: 60000,
-    physicsEnabled: false // Reduces CPU, we only need chat/stats
+    checkTimeoutInterval: 60000
   });
 
-  let lastPos = null;
-  let isSpawned = false;
-  
-  // HEARTBEAT MONITOR (critical fix for silent disconnects)
-  heartbeatInterval = setInterval(() => {
-    if (!currentBot?.entity || !isSpawned) return;
-    
-    const pos = currentBot.entity.position;    const moved = !lastPos || pos.distanceTo(lastPos) > 0.1;
-    
-    if (!moved && botState.isAlive) {
-      logEvent('error', '⚠️ HEARTBEAT FAILED: Bot frozen! Forcing reconnect...');
-      currentBot.end?.();
-      return;
-    }
-    
-    lastPos = pos.clone();
-  }, HEARTBEAT_INTERVAL);
-
-  // CONNECTION FLOW (triple-verified)
+  // Track connection flow
   currentBot.once('login', () => {
-    botState.username = currentBot.username;
-    logEvent('info', `🔑 Authenticated as ${botState.username}`);
+    console.log('🔑 Authentication successful');
   });
 
   currentBot.once('spawn', () => {
-    isSpawned = true;
     botState.isAlive = true;
-    botState.lastEvent = 'In-game and active';
-    botState.uptime = formatTime(Date.now() - startTime);
-    broadcastState();
+    botState.username = currentBot.username;
+    botState.lastEvent = 'Successfully joined game';
+    botState.uptime = 'Just started';
     
-    logEvent('success', `✅ FULLY ONLINE: Verified in-game on DonutSMP`);
+    console.log(`✅ JOINED GAME as ${currentBot.username}`);
     
-    // Send verified online webhook
+    // Send verification webhook
     sendWebhook({
       color: 0x57F287,
-      title: '🟢 BOT VERIFIED ONLINE',
-      description: `**Account:** ${botState.username}\n**Server:** donutsmp.net:25565\n**Status:** Actively tracking (movement confirmed)`,
-      timestamp: new Date().toISOString(),
-      footer: { text: 'Triple-verified connection' }
+      title: '🟢 BOT ONLINE',
+      description: `**Account:** ${currentBot.username}\n**Server:** donutsmp.net\n**Status:** Verified in-game`,
+      timestamp: new Date().toISOString()
     });
     
-    // Start stats loop
-    statsInterval = setInterval(fetchAndReportStats, STATS_INTERVAL);
-    fetchAndReportStats(); // Immediate first fetch
+    // Broadcast to panel
+    eventClients.forEach(client => client({ type: 'state', data: botState }));
   });
 
-  // CHAT HANDLING
+  // Chat relay
   currentBot.on('messagestr', (message) => {
-    if (!botState.isAlive || !message.trim()) return;
-    if (message.includes('You whispered')) return;
+    if (!message.trim()) return;
+    console.log(`[CHAT] ${message}`);
     
-    logEvent('chat', message);
-    
-    // Relay important messages to webhook
+    // Relay important messages
     if (message.toLowerCase().includes('disconnect') || 
         message.toLowerCase().includes('error')) {      sendWebhook({
         color: 0xED4245,
-        title: '⚠️ In-Game Alert',
+        title: '⚠️ Game Alert',
         description: `\`${message}\``,
         timestamp: new Date().toISOString()
       });
     }
   });
 
-  currentBot.on('whisper', (username, message) => {
-    if (username === CONTROLLER_NAME && message.startsWith('cmd ')) {
-      const cmd = message.replace('cmd ', '');
-      currentBot.chat(cmd);
-      currentBot.whisper(username, `✅ Executed: ${cmd}`);
-      logEvent('command', `Controller ${username} ran: ${cmd}`);
-    }
-  });
-
-  // DISCONNECT HANDLING (no more silent failures)
-  function handleDisconnect(reason = 'Unknown') {
-    if (reconnectTimeout) return; // Prevent duplicate reconnects
-    
-    isSpawned = false;
+  // Disconnect handling
+  currentBot.on('end', (reason) => {
     botState.isAlive = false;
-    botState.lastEvent = `Disconnected: ${reason}`;
-    broadcastState();
+    botState.lastEvent = `Disconnected: ${reason || 'Unknown'}`;
     
-    logEvent('disconnect', `❌ DISCONNECTED: ${reason}`);
+    console.error(`❌ DISCONNECTED: ${reason || 'No reason'}`);
     
     sendWebhook({
       color: 0xED4245,
       title: '🔴 BOT DISCONNECTED',
-      description: `**Reason:** ${reason}\n**Reconnecting in 15s...**`,
+      description: `**Reason:** ${reason || 'Connection lost'}\n**Reconnecting...**`,
       timestamp: new Date().toISOString()
     });
     
-    // Cleanup
-    clearInterval(statsInterval);
-    clearInterval(heartbeatInterval);
-    currentBot?.removeAllListeners();
+    eventClients.forEach(client => client({ type: 'state', data: botState }));
     
-    // Schedule reconnect
-    reconnectTimeout = setTimeout(() => {
-      reconnectTimeout = null;
-      startBot();
-    }, RECONNECT_DELAY);
-  }
-
-  currentBot.on('end', (reason) => handleDisconnect(reason || 'Connection closed'));
-  currentBot.on('error', (err) => {    if (err.message.includes('ECONNRESET') || err.message.includes('socket')) {
-      handleDisconnect('Network error (socket closed)');
-    } else {
-      logEvent('error', `Bot error: ${err.message}`);
-    }
+    // Reconnect after delay
+    setTimeout(startBot, 15000);
   });
-  currentBot.on('kicked', (reason) => handleDisconnect(`Kicked: ${reason}`));
+
+  currentBot.on('error', (err) => {
+    console.error(`💥 BOT ERROR: ${err.message}`);
+    // Let 'end' event handle reconnection
+  });
 }
 
-// ====== 📊 STATS HANDLER ======
-async function fetchAndReportStats() {
-  if (!botState.isAlive || !currentBot) return;
-  
-  try {
-    const res = await axios.get(`https://api.donutsmp.net/v1/stats/${botState.username}`, {
-      headers: { 
-        'Authorization': `Bearer 93b93228c9954e33989c0e1f049c4662`,
-        'User-Agent': 'DonutSMP-2.0'
-      },
-      timeout: 8000
-    });
-    
-    const stats = res.data.result || res.data;
-    Object.assign(currentStats, {
-      money: formatNum(stats.money, 'money'),
-      shards: formatNum(stats.shards),
-      playtime: formatTime(stats.playtime * 1000)
-    });
-    
-    // Update panel
-    clients.forEach(client => client({ 
-      type: 'stats', 
-      data: { ...currentStats, fetchedAt: new Date().toLocaleTimeString() } 
-    }));
-    
-    // Webhook report (every 5 mins as requested)
-    sendWebhook({
-      color: 0x5865F2,
-      title: `📊 ${botState.username} Live Stats`,
-      fields: [
-        { name: '💵 Money', value: currentStats.money, inline: true },
-        { name: '💎 Shards', value: currentStats.shards, inline: true },
-        { name: '⏱️ Playtime', value: currentStats.playtime, inline: true },
-        { name: '🔌 Status', value: '🟢 Verified Online', inline: true },
-        { name: '⏰ Uptime', value: botState.uptime, inline: true },
-        { name: '🌐 Server', value: 'donutsmp.net:25565', inline: true }
-      ],
-      timestamp: new Date().toISOString(),
-      footer: { text: 'Stats updated every 5 minutes' }
-    });    
-    logEvent('info', `📈 Stats updated: ${currentStats.money} | ${currentStats.shards} shards`);
-  } catch (err) {
-    logEvent('error', `API fetch failed: ${err.message}`);
-    // Continue bot operation even if API fails
-  }
-}
-
-function formatNum(num, type) {
-  if (!num && num !== 0) return '0';
-  const n = parseFloat(num);
-  if (type === 'money') {
-    if (n >= 1e9) return `${(n/1e9).toFixed(2)}B`;
-    if (n >= 1e6) return `${(n/1e6).toFixed(2)}M`;
-    if (n >= 1e3) return `${(n/1e3).toFixed(2)}K`;
-  }
-  return n.toLocaleString();
-}
-
-// ====== 🚀 START SERVICES ======
-// Start web server FIRST (critical for Render health checks)
+// Start everything
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🌐 Control panel ready at http://localhost:${PORT}`);
-  console.log(`🔒 Panel access: POST /api/verify with { "secret": "your_password" }`);
-  console.log(`⚠️  IMPORTANT: Set PANEL_SECRET in .env file!`);
+  console.log(`🌐 Server running on port ${PORT}`);
+  console.log(`🔒 Panel requires secret: ${PANEL_SECRET.substring(0, 3)}...`);
+  
+  // Wait 2 seconds then start bot
+  setTimeout(() => {
+    startBot();
+  }, 2000);
 });
-
-// Start bot after 2 seconds (lets web server bind first)
-setTimeout(() => {
-  if (!MC_EMAIL) {
-    console.error('❌ FATAL: MC_EMAIL not set in environment variables!');
-    process.exit(1);
-  }
-  startBot();
-}, 2000);
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  logEvent('info', ' Shutting down...');
-  currentBot?.end?.();
+  if (currentBot) {
+    currentBot.end?.();  }
   process.exit(0);
 });
