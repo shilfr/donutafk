@@ -102,7 +102,7 @@ function startBot() {
         port: 25565,
         username: process.env.MC_EMAIL,
         auth: 'microsoft',
-        version: '1.20.1',
+        version: '1.20.2',
         hideErrors: false, // Changed to see actual errors
         checkTimeoutInterval: 60 * 1000, // Increased timeout
         connectTimeout: 30 * 1000 // Added explicit timeout
