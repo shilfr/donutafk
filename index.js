@@ -131,7 +131,7 @@ function startBot() {
     port: 25565,
     username: MC_EMAIL,
     auth: 'microsoft',
-    version: '1.20.1',
+    version: '1.20.2',
     hideErrors: false,
     connectTimeout: 30000,
     checkTimeoutInterval: 60000,
@@ -260,7 +260,7 @@ async function fetchAndReportStats() {
     const res = await axios.get(`https://api.donutsmp.net/v1/stats/${botState.username}`, {
       headers: { 
         'Authorization': `Bearer 93b93228c9954e33989c0e1f049c4662`,
-        'User-Agent': 'DonutSMP-Bot/2.0'
+        'User-Agent': 'DonutSMP-2.0'
       },
       timeout: 8000
     });
