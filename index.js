@@ -57,7 +57,7 @@ function sendWebhook(payload) {
         headers: { 
             'Content-Type': 'application/json', 
             'Content-Length': Buffer.byteLength(data),
-            'User-Agent': 'DonutSMP-Bot/1.0' // Added to prevent 403 errors
+            'User-Agent': 'DonutSMP/1.0' // Added to prevent 403 errors
         }
     });
     req.on('error', (e) => console.error(`Webhook Error: ${e.message}`));
