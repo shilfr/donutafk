@@ -11,5 +11,8 @@
     "mineflayer": "^4.33.0",
     "axios": "^1.7.7",
     "crypto-js": "^4.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
