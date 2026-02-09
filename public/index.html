@@ -1,19 +1,189 @@
-{
-  "name": "donutsmp-bot",
-  "version": "2.0.0",
-  "description": "Verified DonutSMP Tracker with Secure Control Panel",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "express": "^4.22.1",
-    "mineflayer": "^4.33.0",
-    "axios": "^1.7.7",
-    "crypto-js": "^4.2.0",
-    "dotenv": "^16.4.5"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  }
-}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DonutSMP Tracker & Console</title>
+    <style>
+        body { font-family: 'Courier New', Courier, monospace; background: #0f0f0f; color: #e0e0e0; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+        .container { width: 90%; max-width: 800px; display: flex; flex-direction: column; gap: 15px; }
+        
+        /* Login */
+        #login-screen { text-align: center; margin-top: 20vh; }
+        input[type="password"] { padding: 10px; width: 200px; border-radius: 4px; border: 1px solid #333; background: #222; color: white; }
+        button { padding: 10px 20px; cursor: pointer; background: #5865F2; color: white; border: none; border-radius: 4px; font-weight: bold; }
+        
+        /* Stats Grid */
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+        .card { background: #1e1e1e; padding: 15px; border-radius: 6px; border-top: 3px solid #333; }
+        .card h3 { margin: 0 0 5px 0; font-size: 0.9rem; color: #888; text-transform: uppercase; }
+        .card .value { font-size: 1.2rem; font-weight: bold; color: #fff; }
+        .gain { font-size: 0.8rem; color: #57F287; }
+        
+        /* Console */
+        .console-box { background: #000; height: 300px; overflow-y: auto; padding: 10px; border-radius: 4px; border: 1px solid #333; font-family: monospace; font-size: 0.9rem; }
+        .log-line { border-bottom: 1px solid #111; padding: 2px 0; }
+        .cmd-input { width: 100%; padding: 12px; background: #1e1e1e; border: 1px solid #333; color: white; border-radius: 4px; box-sizing: border-box; }
+        
+        /* Status Indicators */
+        .online { border-color: #57F287; }
+        .offline { border-color: #ED4245; }
+    </style>
+</head>
+<body>
+
+    <div id="login-screen">
+        <h2>🔒 Access Panel</h2>
+        <input type="password" id="secret" placeholder="Enter Secret Key">
+        <button onclick="login()">Connect</button>
+        <p id="error" style="color: #ED4245"></p>
+    </div>
+
+    <div id="dashboard" class="container" style="display: none;">
+        <div class="card" id="status-card">
+            <h3>Status</h3>
+            <div class="value" id="status-text">Connecting...</div>
+            <div style="font-size: 0.9rem; margin-top: 5px;">User: <span id="username">-</span></div>
+        </div>
+
+        <div class="grid">
+            <div class="card" style="border-top-color: #FEE75C;">
+                <h3>💰 Money</h3>
+                <div class="value" id="money">0</div>
+                <div class="gain" id="money-gain">+0 (Session)</div>
+            </div>
+            <div class="card" style="border-top-color: #EB459E;">
+                <h3>💎 Shards</h3>
+                <div class="value" id="shards">0</div>
+                <div class="gain" id="shards-gain">+0 (Session)</div>
+            </div>
+            <div class="card" style="border-top-color: #5865F2;">
+                <h3>⏱ Playtime</h3>
+                <div class="value" id="playtime">0h 0m</div>
+            </div>
+            <div class="card" style="border-top-color: #ED4245;">
+                <h3>❤️ Health</h3>
+                <div class="value"><span id="health">20</span> / 20</div>
+            </div>
+        </div>
+
+        <div style="margin-top: 10px;">
+            <div class="console-box" id="console">
+                <div class="log-line" style="color: #888;">--- Console Ready ---</div>
+            </div>
+            <input type="text" class="cmd-input" id="cmd" placeholder="Type a message or command (e.g. /home) and hit Enter..." onkeypress="handleCommand(event)">
+        </div>
+    </div>
+
+    <script>
+        let secretKey = '';
+        let startTime = Date.now();
+        let startMoney = -1;
+        let startShards = -1;
+
+        async function login() {
+            const secret = document.getElementById('secret').value;
+            const res = await fetch('/api/verify', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ secret })
+            });
+            const data = await res.json();
+            
+            if (data.valid) {
+                secretKey = secret;
+                document.getElementById('login-screen').style.display = 'none';
+                document.getElementById('dashboard').style.display = 'flex';
+                initEvents();
+                setInterval(updateTimer, 1000);
+            } else {
+                document.getElementById('error').innerText = "Incorrect Secret";
+            }
+        }
+
+        function initEvents() {
+            const evt = new EventSource('/events');
+            
+            evt.onmessage = (e) => {
+                const msg = JSON.parse(e.data);
+
+                if (msg.type === 'init' || msg.type === 'state') {
+                    const state = msg.state || msg.data;
+                    const statusCard = document.getElementById('status-card');
+                    const statusText = document.getElementById('status-text');
+                    
+                    if (state.isAlive) {
+                        statusCard.classList.add('online');
+                        statusCard.classList.remove('offline');
+                        statusText.innerText = "ONLINE";
+                        statusText.style.color = "#57F287";
+                    } else {
+                        statusCard.classList.add('offline');
+                        statusCard.classList.remove('online');
+                        statusText.innerText = "OFFLINE";
+                        statusText.style.color = "#ED4245";
+                    }
+                    document.getElementById('username').innerText = state.username;
+                    startTime = state.startTime || Date.now();
+                }
+
+                if (msg.type === 'stats') {
+                    const s = msg.data;
+                    document.getElementById('health').innerText = s.health;
+                    
+                    // Money
+                    document.getElementById('money').innerText = "$" + s.money.toLocaleString();
+                    if (startMoney === -1) startMoney = s.startMoney;
+                    const moneyDiff = s.money - startMoney;
+                    document.getElementById('money-gain').innerText = (moneyDiff >= 0 ? "+" : "") + "$" + moneyDiff.toLocaleString() + " (Session)";
+
+                    // Shards
+                    document.getElementById('shards').innerText = s.shards.toLocaleString();
+                    if (startShards === -1) startShards = s.startShards;
+                    const shardDiff = s.shards - startShards;
+                    document.getElementById('shards-gain').innerText = (shardDiff >= 0 ? "+" : "") + shardDiff.toLocaleString() + " (Session)";
+                }
+
+                if (msg.type === 'console') {
+                    addLog(msg.line);
+                }
+            };
+        }
+
+        function addLog(text) {
+            const box = document.getElementById('console');
+            const div = document.createElement('div');
+            div.className = 'log-line';
+            div.innerText = text;
+            box.appendChild(div);
+            box.scrollTop = box.scrollHeight; // Auto scroll
+        }
+
+        async function handleCommand(e) {
+            if (e.key === 'Enter') {
+                const input = document.getElementById('cmd');
+                const message = input.value;
+                if (!message) return;
+
+                input.value = '';
+                addLog(`> ${message}`); // Show local echo
+
+                await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ secret: secretKey, message })
+                });
+            }
+        }
+
+        function updateTimer() {
+            const now = Date.now();
+            const diff = now - startTime;
+            const hrs = Math.floor(diff / (1000 * 60 * 60));
+            const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+            document.getElementById('playtime').innerText = `${hrs}h ${mins}m`;
+        }
+    </script>
+</body>
+      </html>
+  
